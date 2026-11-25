@@ -21,6 +21,7 @@
     saveTheme
   } from './lib/clientId';
   import { RoomSocket } from './lib/ws.svelte';
+  import MatchTab from './lib/components/MatchTab.svelte';
   import type { RoomSnapshot } from './lib/types';
 
   const clientId = getOrCreateClientId();
@@ -53,6 +54,7 @@
 
   // Estado UI
   let copiedCode = $state(false);
+  let showPresence = $state(false);
   let loadingRoom = $state(false);
   let roomLoadError = $state('');
   let previewTitle = $state('');
@@ -423,10 +425,10 @@
     <header class="topbar room-top">
       <div class="room-top-left">
         <button class="brand-back" onclick={leaveRoom}>HayMatch</button>
-        <span class="pill-live">
+        <button class="pill-live" onclick={() => (showPresence = !showPresence)} title="Ver conectados">
           <span class="live-dot"></span>
           {socket.snapshot ? `${socket.snapshot.onlineCount} en vivo` : 'Conectando...'}
-        </span>
+        </button>
       </div>
       <div class="room-top-actions">
         <button class="icon-btn" onclick={shareOnWhatsApp} aria-label="Compartir por WhatsApp" title="Compartir por WhatsApp">
@@ -470,54 +472,48 @@
           </p>
         </section>
 
-        <!-- PANEL DE CONECTADOS EN TIEMPO REAL (VERIFICACIÓN SPRINT 1) -->
-        <section class="card stack">
-          <div class="section-head">
-            <div class="inline-title">
-              <Users size={16} />
-              <h2>En la sala ({snap.participants.length})</h2>
-            </div>
-            <span class="muted">{snap.onlineCount} online ahora</span>
-          </div>
-
-          <ul class="presence-list">
-            {#each snap.participants as person (person.clientId)}
-              <li class="presence-item">
-                <span class="avatar" class:online={person.isOnline}>
-                  {person.name.slice(0, 2).toUpperCase()}
-                </span>
-                <div class="presence-info">
-                  <span class="person-name">
-                    {person.name}
-                    {#if person.clientId === clientId}
-                      <span class="you-tag">Vos</span>
-                    {/if}
-                  </span>
-                  <span class="muted small">
-                    {person.isOnline ? 'Conectado ahora' : 'Desconectado'}
-                  </span>
-                </div>
-                <span class="status-dot" class:online={person.isOnline}></span>
-              </li>
-            {/each}
-          </ul>
-        </section>
-
-        {#if activeTab === 'match'}
+        <!-- PANEL DESPLEGABLE DE CONECTADOS EN VIVO (tocando el badge verde arriba) -->
+        {#if showPresence}
           <section class="card stack">
             <div class="section-head">
-              <h2>Opciones cargadas ({snap.options.length})</h2>
-              <span class="muted">Listas para Sprint 2</span>
+              <div class="inline-title">
+                <Users size={16} />
+                <h2>En la sala ({snap.participants.length})</h2>
+              </div>
+              <span class="muted">{snap.onlineCount} online ahora</span>
             </div>
-            <p class="muted">
-              La habitación SQLite ya tiene estas opciones guardadas. En el <strong>Sprint 2</strong> activamos las tarjetas Sí/No, el podio en vivo y el desempate.
-            </p>
-            <div class="chips">
-              {#each snap.options as opt (opt.id)}
-                <span class="chip">{opt.category}: {opt.title}</span>
+
+            <ul class="presence-list">
+              {#each snap.participants as person (person.clientId)}
+                <li class="presence-item">
+                  <span class="avatar" class:online={person.isOnline}>
+                    {person.name.slice(0, 2).toUpperCase()}
+                  </span>
+                  <div class="presence-info">
+                    <span class="person-name">
+                      {person.name}
+                      {#if person.clientId === clientId}
+                        <span class="you-tag">Vos</span>
+                      {/if}
+                    </span>
+                    <span class="muted small">
+                      {person.isOnline ? 'Conectado ahora' : 'Desconectado'}
+                    </span>
+                  </div>
+                  <span class="status-dot" class:online={person.isOnline}></span>
+                </li>
               {/each}
-            </div>
+            </ul>
           </section>
+        {/if}
+
+        {#if activeTab === 'match'}
+          <MatchTab
+            snapshot={snap}
+            onVote={(optionId, vote) => socket.send({ type: 'vote', optionId, vote })}
+            onAddOption={(category, title) => socket.send({ type: 'add_option', category, title })}
+            onTiebreak={() => socket.send({ type: 'tiebreak' })}
+          />
         {:else}
           <section class="card stack">
             <div class="section-head">

@@ -25,6 +25,14 @@ interface CreateRoomPayload {
   aliasMp: string;
 }
 
+interface TiebreakResult {
+  optionId: number;
+  title: string;
+  category: string;
+  decidedAt: string;
+  decidedBy: string;
+}
+
 const TEMPLATES: Record<string, Array<{ category: string; title: string }>> = {
   asado: [
     { category: 'Bebida', title: 'Fernet con Coca' },
@@ -103,7 +111,8 @@ export class SalaRoom extends DurableObject<Env> {
           deposit_amount INTEGER NOT NULL DEFAULT 10000,
           total_amount INTEGER NOT NULL DEFAULT 30000,
           deadline_text TEXT NOT NULL DEFAULT '30/11',
-          alias_mp TEXT NOT NULL DEFAULT ''
+          alias_mp TEXT NOT NULL DEFAULT '',
+          tiebreak_json TEXT DEFAULT NULL
         );
 
         CREATE TABLE IF NOT EXISTS participants (
@@ -129,6 +138,14 @@ export class SalaRoom extends DurableObject<Env> {
           PRIMARY KEY (option_id, client_id)
         );
       `);
+
+      // Migración suave para salas creadas en Sprint 1 antes de agregar tiebreak_json
+      const cols = this.ctx.storage.sql
+        .exec<{ name: string }>('PRAGMA table_info(room_meta)')
+        .toArray();
+      if (!cols.some((c) => c.name === 'tiebreak_json')) {
+        this.ctx.storage.sql.exec('ALTER TABLE room_meta ADD COLUMN tiebreak_json TEXT DEFAULT NULL');
+      }
     });
   }
 
@@ -150,7 +167,22 @@ export class SalaRoom extends DurableObject<Env> {
     return ids;
   }
 
-  private buildSnapshot() {
+  private getMyVotes(clientId?: string): Record<number, 0 | 1> {
+    const map: Record<number, 0 | 1> = {};
+    if (!clientId) return map;
+    const rows = this.ctx.storage.sql
+      .exec<{ option_id: number; vote: number }>(
+        'SELECT option_id, vote FROM votes WHERE client_id = ?',
+        clientId
+      )
+      .toArray();
+    for (const r of rows) {
+      map[r.option_id] = r.vote === 1 ? 1 : 0;
+    }
+    return map;
+  }
+
+  private buildBaseSnapshot() {
     const meta = this.ctx.storage.sql
       .exec<{
         code: string;
@@ -162,7 +194,10 @@ export class SalaRoom extends DurableObject<Env> {
         total_amount: number;
         deadline_text: string;
         alias_mp: string;
-      }>('SELECT code, title, created_at, vaquita_enabled, goal_people, deposit_amount, total_amount, deadline_text, alias_mp FROM room_meta WHERE id = 1')
+        tiebreak_json: string | null;
+      }>(
+        'SELECT code, title, created_at, vaquita_enabled, goal_people, deposit_amount, total_amount, deadline_text, alias_mp, tiebreak_json FROM room_meta WHERE id = 1'
+      )
       .one();
 
     const onlineIds = this.getOnlineClientIds();
@@ -200,6 +235,15 @@ export class SalaRoom extends DurableObject<Env> {
       `)
       .toArray();
 
+    let tiebreak: TiebreakResult | null = null;
+    if (meta.tiebreak_json) {
+      try {
+        tiebreak = JSON.parse(meta.tiebreak_json) as TiebreakResult;
+      } catch {
+        tiebreak = null;
+      }
+    }
+
     return {
       room: {
         code: meta.code,
@@ -227,22 +271,26 @@ export class SalaRoom extends DurableObject<Env> {
         title: o.title,
         proposedBy: o.proposed_by,
         yesCount: o.yes_count,
-        noCount: o.no_count
-      }))
+        noCount: o.no_count,
+        totalVotes: o.yes_count + o.no_count
+      })),
+      tiebreak
     };
   }
 
   private broadcastSnapshot() {
     if (!this.roomExists()) return;
-    const message = JSON.stringify({
-      type: 'snapshot',
-      payload: this.buildSnapshot()
-    });
+    const base = this.buildBaseSnapshot();
     for (const ws of this.ctx.getWebSockets()) {
       try {
-        ws.send(message);
+        const att = ws.deserializeAttachment() as WsAttachment | null;
+        const payload = {
+          ...base,
+          myVotes: this.getMyVotes(att?.clientId)
+        };
+        ws.send(JSON.stringify({ type: 'snapshot', payload }));
       } catch {
-        // Ignore stale sockets; close handler will clean them up
+        // Ignore stale sockets
       }
     }
   }
@@ -263,8 +311,8 @@ export class SalaRoom extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO room_meta (
           id, code, title, created_at, organizer_pin_hash, organizer_salt,
-          vaquita_enabled, goal_people, deposit_amount, total_amount, deadline_text, alias_mp
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          vaquita_enabled, goal_people, deposit_amount, total_amount, deadline_text, alias_mp, tiebreak_json
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
         body.code,
         body.title.trim().slice(0, 60),
         now,
@@ -299,7 +347,7 @@ export class SalaRoom extends DurableObject<Env> {
         );
       }
 
-      return Response.json(this.buildSnapshot(), { status: 201 });
+      return Response.json({ ...this.buildBaseSnapshot(), myVotes: {} }, { status: 201 });
     }
 
     // 2. Estado inicial por HTTP
@@ -307,7 +355,7 @@ export class SalaRoom extends DurableObject<Env> {
       if (!this.roomExists()) {
         return Response.json({ error: 'No encontramos esa sala. Revisá el código.' }, { status: 404 });
       }
-      return Response.json(this.buildSnapshot());
+      return Response.json({ ...this.buildBaseSnapshot(), myVotes: {} });
     }
 
     // 3. Conexión WebSocket en vivo
@@ -332,7 +380,15 @@ export class SalaRoom extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     if (typeof message !== 'string') return;
-    let data: { type?: string; clientId?: string; name?: string };
+    let data: {
+      type?: string;
+      clientId?: string;
+      name?: string;
+      optionId?: number;
+      vote?: number;
+      category?: string;
+      title?: string;
+    };
     try {
       data = JSON.parse(message);
     } catch {
@@ -340,6 +396,7 @@ export class SalaRoom extends DurableObject<Env> {
       return;
     }
 
+    // 1. Unirse a la sala
     if (data.type === 'join' && data.clientId && data.name) {
       const cleanId = data.clientId.trim().slice(0, 64);
       const cleanName = data.name.trim().slice(0, 40);
@@ -357,6 +414,95 @@ export class SalaRoom extends DurableObject<Env> {
 
       const attachment: WsAttachment = { clientId: cleanId, name: cleanName };
       ws.serializeAttachment(attachment);
+      this.broadcastSnapshot();
+      return;
+    }
+
+    const att = ws.deserializeAttachment() as WsAttachment | null;
+    if (!att?.clientId) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Primero ingresá a la sala con tu apodo.' }));
+      return;
+    }
+
+    // 2. Votar una tarjeta (Sí = 1, No = 0)
+    if (data.type === 'vote' && typeof data.optionId === 'number' && (data.vote === 0 || data.vote === 1)) {
+      const exists = this.ctx.storage.sql
+        .exec<{ cnt: number }>('SELECT COUNT(*) as cnt FROM options WHERE id = ?', data.optionId)
+        .one();
+      if (exists.cnt === 0) return;
+
+      this.ctx.storage.sql.exec(
+        `INSERT INTO votes (option_id, client_id, vote)
+         VALUES (?, ?, ?)
+         ON CONFLICT(option_id, client_id) DO UPDATE SET vote = excluded.vote`,
+        data.optionId,
+        att.clientId,
+        data.vote
+      );
+      // Si entran nuevos votos, limpiamos un desempate anterior para que no quede viejo
+      this.ctx.storage.sql.exec('UPDATE room_meta SET tiebreak_json = NULL WHERE id = 1');
+      this.broadcastSnapshot();
+      return;
+    }
+
+    // 3. Proponer una nueva opción en vivo
+    if (data.type === 'add_option' && typeof data.title === 'string') {
+      const cleanTitle = data.title.trim().slice(0, 70);
+      const cleanCat = (data.category || 'Idea').trim().slice(0, 24) || 'Idea';
+      if (cleanTitle.length < 2) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Escribí un nombre válido para la opción.' }));
+        return;
+      }
+
+      const countRow = this.ctx.storage.sql
+        .exec<{ cnt: number }>('SELECT COUNT(*) as cnt FROM options')
+        .one();
+      if (countRow.cnt >= 50) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Límite de 50 opciones por sala alcanzado.' }));
+        return;
+      }
+
+      this.ctx.storage.sql.exec(
+        `INSERT INTO options (category, title, proposed_by, created_at) VALUES (?, ?, ?, ?)`,
+        cleanCat,
+        cleanTitle,
+        att.name,
+        new Date().toISOString()
+      );
+      this.broadcastSnapshot();
+      return;
+    }
+
+    // 4. Desempate justo sincronizado en servidor
+    if (data.type === 'tiebreak') {
+      const base = this.buildBaseSnapshot();
+      const maxYes = Math.max(0, ...base.options.map((o) => o.yesCount));
+      if (maxYes === 0) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Todavía no hay votos positivos para desempatar.' }));
+        return;
+      }
+      const tied = base.options.filter((o) => o.yesCount === maxYes);
+      if (tied.length < 2) {
+        ws.send(JSON.stringify({ type: 'error', message: 'No hay empate en el primer puesto.' }));
+        return;
+      }
+
+      const rand = new Uint32Array(1);
+      crypto.getRandomValues(rand);
+      const winner = tied[rand[0] % tied.length];
+
+      const result: TiebreakResult = {
+        optionId: winner.id,
+        title: winner.title,
+        category: winner.category,
+        decidedAt: new Date().toISOString(),
+        decidedBy: att.name
+      };
+
+      this.ctx.storage.sql.exec(
+        'UPDATE room_meta SET tiebreak_json = ? WHERE id = 1',
+        JSON.stringify(result)
+      );
       this.broadcastSnapshot();
     }
   }
