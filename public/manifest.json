@@ -1,0 +1,10 @@
+{
+  "name": "HayMatch — Decisiones y Vaquita en vivo",
+  "short_name": "HayMatch",
+  "description": "Votación grupal en tiempo real y vaquita para juntadas y eventos.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#121417",
+  "theme_color": "#121417",
+  "lang": "es-AR"
+}
