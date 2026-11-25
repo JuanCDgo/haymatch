@@ -10,7 +10,8 @@
     Wallet,
     Users,
     ArrowRight,
-    Plus
+    Plus,
+    LogOut
   } from 'lucide-svelte';
   import {
     getOrCreateClientId,
@@ -204,7 +205,8 @@
       `*${snap.room.title}*`,
       `Entra a la sala de HayMatch para votar en vivo y ver la organizacion:`,
       `• Codigo de sala: *${snap.room.code}*`,
-      `• Link directo: ${roomUrl}`
+      `• Link directo:`,
+      roomUrl
     ];
     if (snap.room.vaquitaEnabled) {
       lines.push(
@@ -430,12 +432,15 @@
         <button class="icon-btn" onclick={shareOnWhatsApp} aria-label="Compartir por WhatsApp" title="Compartir por WhatsApp">
           <Share2 size={17} />
         </button>
-        <button class="icon-btn" onclick={toggleTheme} aria-label="Cambiar tema">
+        <button class="icon-btn" onclick={toggleTheme} aria-label="Cambiar tema" title="Cambiar tema">
           {#if theme === 'dark'}
             <Sun size={18} />
           {:else}
             <Moon size={18} />
           {/if}
+        </button>
+        <button class="icon-btn icon-btn-exit" onclick={leaveRoom} aria-label="Salir de la sala" title="Salir de la sala">
+          <LogOut size={17} />
         </button>
       </div>
     </header>
@@ -610,6 +615,11 @@
     align-items: center;
     justify-content: center;
     color: var(--text-primary);
+  }
+
+  .icon-btn-exit:hover {
+    border-color: var(--danger);
+    color: var(--danger);
   }
 
   .content {
