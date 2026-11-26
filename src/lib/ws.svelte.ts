@@ -4,6 +4,8 @@ export class RoomSocket {
   snapshot = $state<RoomSnapshot | null>(null);
   connected = $state(false);
   error = $state('');
+  authMessage = $state('');
+  authLockedUntil = $state(0);
 
   private ws: WebSocket | null = null;
   private code = '';
@@ -18,6 +20,8 @@ export class RoomSocket {
     this.code = code.toUpperCase();
     this.clientId = clientId;
     this.nickname = nickname;
+    this.authMessage = '';
+    this.authLockedUntil = 0;
     this.openSocket();
   }
 
@@ -42,6 +46,16 @@ export class RoomSocket {
         const msg = JSON.parse(event.data) as WsIncoming;
         if (msg.type === 'snapshot') {
           this.snapshot = msg.payload;
+        } else if (msg.type === 'auth_result') {
+          if (msg.ok) {
+            this.authMessage = '';
+            this.authLockedUntil = 0;
+          } else {
+            this.authMessage = msg.message || 'PIN incorrecto.';
+            if (msg.lockedUntil) {
+              this.authLockedUntil = msg.lockedUntil;
+            }
+          }
         } else if (msg.type === 'error') {
           this.error = msg.message;
         }

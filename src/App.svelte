@@ -22,7 +22,9 @@
   } from './lib/clientId';
   import { RoomSocket } from './lib/ws.svelte';
   import MatchTab from './lib/components/MatchTab.svelte';
-  import type { RoomSnapshot } from './lib/types';
+  import VaquitaTab from './lib/components/VaquitaTab.svelte';
+  import { formatARS } from './lib/money';
+  import type { RoomSnapshot, VaquitaMode } from './lib/types';
 
   const clientId = getOrCreateClientId();
   const socket = new RoomSocket();
@@ -44,6 +46,7 @@
   let createOrganizer = $state(getSavedNickname());
   let createPin = $state('');
   let createVaquita = $state(true);
+  let createVaquitaMode = $state<VaquitaMode>('cuotas');
   let createGoal = $state(30);
   let createDeposit = $state(10000);
   let createTotal = $state(30000);
@@ -62,10 +65,6 @@
   function toggleTheme() {
     theme = theme === 'dark' ? 'light' : 'dark';
     saveTheme(theme);
-  }
-
-  function formatARS(amount: number): string {
-    return '$ ' + new Intl.NumberFormat('es-AR').format(amount);
   }
 
   function getRoomCodeFromUrl(): string | null {
@@ -145,6 +144,7 @@
           organizerClientId: clientId,
           pin: createPin.trim(),
           vaquitaEnabled: createVaquita,
+          vaquitaMode: createVaquitaMode,
           goalPeople: Number(createGoal) || 30,
           depositAmount: Number(createDeposit) || 10000,
           totalAmount: Number(createTotal) || 30000,
@@ -211,9 +211,13 @@
       roomUrl
     ];
     if (snap.room.vaquitaEnabled) {
-      lines.push(
-        `• Sena: *${formatARS(snap.room.depositAmount)}* (hasta ${snap.room.deadlineText}) · Total: *${formatARS(snap.room.totalAmount)}*`
-      );
+      if (snap.room.vaquitaMode === 'cuotas') {
+        lines.push(
+          `• Sena: *${formatARS(snap.room.depositAmount)}* (hasta ${snap.room.deadlineText}) · Total: *${formatARS(snap.room.totalAmount)}*`
+        );
+      } else {
+        lines.push(`• Modo Vaquita: *Division de gastos en vivo*`);
+      }
     }
     const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(lines.join('\n'))}`;
     window.open(url, '_blank', 'noopener,noreferrer');
@@ -352,30 +356,44 @@
 
         {#if createVaquita}
           <div class="vaquita-box">
-            <div class="grid-2">
-              <div class="field">
-                <label for="v-goal">Meta personas</label>
-                <input id="v-goal" type="number" min="2" max="500" bind:value={createGoal} />
-              </div>
-              <div class="field">
-                <label for="v-deadline">Fecha límite seña</label>
-                <input id="v-deadline" type="text" bind:value={createDeadline} placeholder="30/11" />
-              </div>
-            </div>
-            <div class="grid-2">
-              <div class="field">
-                <label for="v-deposit">Seña (ARS $)</label>
-                <input id="v-deposit" type="number" min="0" step="500" bind:value={createDeposit} />
-              </div>
-              <div class="field">
-                <label for="v-total">Total por persona (ARS $)</label>
-                <input id="v-total" type="number" min="0" step="500" bind:value={createTotal} />
-              </div>
-            </div>
             <div class="field">
-              <label for="v-alias">Alias Mercado Pago / Banco (opcional)</label>
-              <input id="v-alias" type="text" bind:value={createAlias} placeholder="ej. asado.fin.ano" />
+              <label for="v-mode">¿Cómo manejan la plata?</label>
+              <select id="v-mode" bind:value={createVaquitaMode}>
+                <option value="cuotas">Cuota y Señas (monto fijo por persona)</option>
+                <option value="gastos">Dividir gastos (cada uno carga lo que compró)</option>
+              </select>
             </div>
+
+            {#if createVaquitaMode === 'cuotas'}
+              <div class="grid-2">
+                <div class="field">
+                  <label for="v-goal">Meta personas</label>
+                  <input id="v-goal" type="number" min="2" max="500" bind:value={createGoal} />
+                </div>
+                <div class="field">
+                  <label for="v-deadline">Fecha límite seña</label>
+                  <input id="v-deadline" type="text" bind:value={createDeadline} placeholder="30/11" />
+                </div>
+              </div>
+              <div class="grid-2">
+                <div class="field">
+                  <label for="v-deposit">Seña (ARS $)</label>
+                  <input id="v-deposit" type="number" min="0" step="500" bind:value={createDeposit} />
+                </div>
+                <div class="field">
+                  <label for="v-total">Total por persona (ARS $)</label>
+                  <input id="v-total" type="number" min="0" step="500" bind:value={createTotal} />
+                </div>
+              </div>
+              <div class="field">
+                <label for="v-alias">Alias Mercado Pago / Banco (opcional)</label>
+                <input id="v-alias" type="text" bind:value={createAlias} placeholder="ej. asado.fin.ano" />
+              </div>
+            {:else}
+              <p class="muted small">
+                Cada participante carga lo que compró (carne, bebida, hielo) y la app calcula automáticamente quién le transfiere a quién.
+              </p>
+            {/if}
           </div>
         {/if}
 
@@ -515,25 +533,21 @@
             onTiebreak={() => socket.send({ type: 'tiebreak' })}
           />
         {:else}
-          <section class="card stack">
-            <div class="section-head">
-              <h2>Resumen de Vaquita</h2>
-              <span class="muted">Seña hasta {snap.room.deadlineText}</span>
-            </div>
-            <div class="grid-2">
-              <div class="metric">
-                <span class="muted small">Seña</span>
-                <strong>{formatARS(snap.room.depositAmount)}</strong>
-              </div>
-              <div class="metric">
-                <span class="muted small">Total por persona</span>
-                <strong>{formatARS(snap.room.totalAmount)}</strong>
-              </div>
-            </div>
-            <p class="muted">
-              Meta: <strong>{snap.room.goalPeople} personas</strong>. En el <strong>Sprint 3</strong> activamos el QR por Alias, el modo Organizador con PIN y los estados de pago.
-            </p>
-          </section>
+          <VaquitaTab
+            snapshot={snap}
+            {clientId}
+            authMessage={socket.authMessage}
+            authLockedUntil={socket.authLockedUntil}
+            onAuthOrganizer={(pin) => socket.send({ type: 'auth_organizer', pin })}
+            onLogoutOrganizer={() => socket.send({ type: 'logout_organizer' })}
+            onSetPayment={(targetClientId, status) =>
+              socket.send({ type: 'set_payment', targetClientId, status })}
+            onAddGuest={(name, status) => socket.send({ type: 'add_guest', name, status })}
+            onUpdateAlias={(aliasMp) => socket.send({ type: 'update_alias', aliasMp })}
+            onAddExpense={(description, amount) =>
+              socket.send({ type: 'add_expense', description, amount })}
+            onDeleteExpense={(expenseId) => socket.send({ type: 'delete_expense', expenseId })}
+          />
         {/if}
       {:else}
         <section class="card">
@@ -819,34 +833,6 @@
 
   .status-dot.online {
     background: var(--accent);
-  }
-
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .chip {
-    font-size: 0.78rem;
-    padding: 5px 9px;
-    border-radius: 8px;
-    background: var(--bg-surface-2);
-    border: 1px solid var(--border-subtle);
-  }
-
-  .metric {
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: var(--bg-surface-2);
-    border: 1px solid var(--border-subtle);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .metric strong {
-    font-size: 1.05rem;
   }
 
   .bottom-nav {
