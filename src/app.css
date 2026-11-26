@@ -16,19 +16,19 @@
 }
 
 [data-theme='light'] {
-  /* Regla 60-30-10 — Estilo B: Estudio Limpio (Modo Día) */
+  /* Regla 60-30-10 — Estilo B: Estudio Limpio (Modo Día · Contraste WCAG AA >= 4.5:1) */
   --bg-page: #f6f7f6;          /* 60% blanco hueso */
   --bg-surface: #ffffff;       /* 30% blanco limpio */
   --bg-surface-2: #eff2f0;
   --border-subtle: #e2e5e3;    /* borde sutil 1px */
   --text-primary: #16181a;
-  --text-secondary: #5c646a;
-  --accent: #059669;           /* 10% esmeralda profundo */
-  --accent-hover: #047857;
-  --accent-soft: rgba(5, 150, 105, 0.11);
+  --text-secondary: #525a60;
+  --accent: #046c4e;           /* 10% esmeralda profundo accesible (contraste > 5.8:1) */
+  --accent-hover: #03543f;
+  --accent-soft: #e6f4ee;
   --accent-text: #ffffff;
-  --danger: #dc2626;
-  --danger-soft: rgba(220, 38, 38, 0.1);
+  --danger: #b91c1c;           /* rojo accesible (contraste > 5.8:1) */
+  --danger-soft: #fdecec;
 }
 
 * {

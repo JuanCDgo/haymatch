@@ -6,3 +6,5 @@ dist/
 *.key
 *.pem
 .DS_Store
+qa-torture/artifacts/
+test-results/
