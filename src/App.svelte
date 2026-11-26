@@ -502,7 +502,7 @@
             </div>
 
             <ul class="presence-list">
-              {#each snap.participants as person (person.clientId)}
+              {#each snap.participants as person (person.publicId)}
                 <li class="presence-item">
                   <span class="avatar" class:online={person.isOnline}>
                     {person.name.slice(0, 2).toUpperCase()}
@@ -510,7 +510,7 @@
                   <div class="presence-info">
                     <span class="person-name">
                       {person.name}
-                      {#if person.clientId === clientId}
+                      {#if person.isMe}
                         <span class="you-tag">Vos</span>
                       {/if}
                     </span>
@@ -525,7 +525,7 @@
           </section>
         {/if}
 
-        {#if activeTab === 'match'}
+        {#if activeTab === 'match' || !snap.room.vaquitaEnabled}
           <MatchTab
             snapshot={snap}
             onVote={(optionId, vote) => socket.send({ type: 'vote', optionId, vote })}
@@ -535,15 +535,16 @@
         {:else}
           <VaquitaTab
             snapshot={snap}
-            {clientId}
             authMessage={socket.authMessage}
             authLockedUntil={socket.authLockedUntil}
             onAuthOrganizer={(pin) => socket.send({ type: 'auth_organizer', pin })}
             onLogoutOrganizer={() => socket.send({ type: 'logout_organizer' })}
-            onSetPayment={(targetClientId, status) =>
-              socket.send({ type: 'set_payment', targetClientId, status })}
+            onSetPayment={(targetPublicId, status) =>
+              socket.send({ type: 'set_payment', targetPublicId, status })}
             onAddGuest={(name, status) => socket.send({ type: 'add_guest', name, status })}
+            onRemoveGuest={(targetPublicId) => socket.send({ type: 'remove_guest', targetPublicId })}
             onUpdateAlias={(aliasMp) => socket.send({ type: 'update_alias', aliasMp })}
+            onUpdateQrImage={(qrImageData) => socket.send({ type: 'update_qr_image', qrImageData })}
             onAddExpense={(description, amount) =>
               socket.send({ type: 'add_expense', description, amount })}
             onDeleteExpense={(expenseId) => socket.send({ type: 'delete_expense', expenseId })}
@@ -556,25 +557,27 @@
       {/if}
     </main>
 
-    <!-- BOTTOM NAV (2 PESTAÑAS IGUAL AL BOCETO STITCH) -->
-    <nav class="bottom-nav">
-      <button
-        class="nav-item"
-        class:active={activeTab === 'match'}
-        onclick={() => (activeTab = 'match')}
-      >
-        <Flame size={20} />
-        <span>Match</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={activeTab === 'vaquita'}
-        onclick={() => (activeTab = 'vaquita')}
-      >
-        <Wallet size={20} />
-        <span>Vaquita</span>
-      </button>
-    </nav>
+    <!-- BOTTOM NAV (solo se muestra si Vaquita está activa en la sala) -->
+    {#if !socket.snapshot || socket.snapshot.room.vaquitaEnabled}
+      <nav class="bottom-nav">
+        <button
+          class="nav-item"
+          class:active={activeTab === 'match'}
+          onclick={() => (activeTab = 'match')}
+        >
+          <Flame size={20} />
+          <span>Match</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={activeTab === 'vaquita'}
+          onclick={() => (activeTab = 'vaquita')}
+        >
+          <Wallet size={20} />
+          <span>Vaquita</span>
+        </button>
+      </nav>
+    {/if}
   {/if}
 </div>
 

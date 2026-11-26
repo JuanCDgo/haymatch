@@ -14,9 +14,19 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Crear nueva sala -> genera código corto y crea su Durable Object
+    // Crear nueva sala -> valida JSON y genera código corto
     if (request.method === 'POST' && url.pathname === '/api/salas') {
-      const body = (await request.json()) as Record<string, unknown>;
+      let body: Record<string, unknown>;
+      try {
+        body = (await request.json()) as Record<string, unknown>;
+      } catch {
+        return Response.json({ error: 'Formato de datos inválido (JSON malformado).' }, { status: 400 });
+      }
+
+      if (!body || typeof body.title !== 'string' || body.title.trim().length < 2) {
+        return Response.json({ error: 'Ingresá un nombre válido para la sala.' }, { status: 400 });
+      }
+
       for (let attempt = 0; attempt < 5; attempt++) {
         const code = generateRoomCode();
         const stub = env.SALA_ROOM.getByName(code);

@@ -73,7 +73,7 @@ test.describe('Capas 4–7 — Protocolo de Tortura QA (HayMatch)', () => {
     await page.click('button:has-text("Sumar a la sala en vivo")');
     await expect(page.locator('text=Podio')).toBeVisible();
 
-    // 4. Ir a Vaquita, probar QR y Modo Organizador (PIN correcto)
+    // 4. Ir a Vaquita, probar QR y verificar sesión de Organizador auto-activa
     await page.click('nav button:has-text("Vaquita")');
     await expect(page.locator('text=Estado de la Vaquita')).toBeVisible();
 
@@ -86,22 +86,34 @@ test.describe('Capas 4–7 — Protocolo de Tortura QA (HayMatch)', () => {
     await expect(page.locator('img[alt="Código QR de pago"]')).toBeVisible();
     await page.click('button[aria-label="Cerrar"]');
 
-    // Autenticar organizador con PIN 1234 y cargar compañero
-    await page.click('button:has-text("Modo Organizador")');
-    await page.fill('#org-pin-login', '1234');
-    await page.click('button:has-text("Desbloquear panel")');
+    // El creador ya entra autenticado como Organizador (Fix /boost #6)
     await expect(page.locator('text=Organizador activo')).toBeVisible();
 
     await page.fill('input[placeholder="Nombre y apellido"]', 'Carlos QA');
     await page.click('button:has-text("Sumar")');
     await expect(page.locator('text=Carlos QA')).toBeVisible();
 
-    // 5. Sabotaje Offline + reconexión + F5
+    // Verificar seguridad anti-IDOR (nunca exponer clientId) y 400 en JSON malformado
+    const roomCode = page.url().split('/').pop()!;
+    const stateResp = await page.request.get(`${BASE_URL}/api/salas/${roomCode}`);
+    const stateText = await stateResp.text();
+    expect(stateText).not.toContain('clientId');
+    expect(stateText).not.toContain('client_id');
+
+    const badJsonResp = await page.request.post(`${BASE_URL}/api/salas`, {
+      data: '{json-roto',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    expect(badJsonResp.status()).toBe(400);
+
+    // 5. Sabotaje Offline + reconexión + F5 (la sesión de Organizador debe persistir!)
     await context.setOffline(true);
     await page.waitForTimeout(400);
     await context.setOffline(false);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForSelector('text=WebSocket activo', { timeout: 10000 });
+    await page.click('nav button:has-text("Vaquita")');
+    await expect(page.locator('text=Organizador activo')).toBeVisible();
 
     // Anti pantalla blanca
     const appTextLen = await page.evaluate(() => (document.getElementById('app')?.innerText || '').trim().length);
@@ -185,11 +197,8 @@ test.describe('Capas 4–7 — Protocolo de Tortura QA (HayMatch)', () => {
     await createRoomViaUI(page, 'cuotas');
     const initialLoadMs = Date.now() - t0;
 
-    // Autenticar organizador y cargar 35 invitados reales
+    // Ir a Vaquita (creador ya autenticado) y cargar 35 invitados reales
     await page.click('nav button:has-text("Vaquita")');
-    await page.click('button:has-text("Modo Organizador")');
-    await page.fill('#org-pin-login', '1234');
-    await page.click('button:has-text("Desbloquear panel")');
     await expect(page.locator('text=Organizador activo')).toBeVisible();
 
     const tRender0 = Date.now();

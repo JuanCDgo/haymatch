@@ -52,17 +52,19 @@ describe('Capa 3 — Fuzzing de lógica financiera (money.ts)', () => {
 
   it('calculateExpenseSplit jamás produce NaN, transferencias negativas ni pierde dinero significativo', () => {
     const participantArb = fc.record({
-      clientId: fc.string({ minLength: 1, maxLength: 12 }),
+      publicId: fc.string({ minLength: 1, maxLength: 12 }),
       name: fc.string({ minLength: 1, maxLength: 20 }),
       status: fc.constant('pendiente' as const),
       paidAmount: fc.constant(0),
       joinedAt: fc.constant('2026-11-25T00:00:00Z'),
-      isOnline: fc.boolean()
+      isOnline: fc.boolean(),
+      isMe: fc.boolean(),
+      isManual: fc.boolean()
     });
 
     fc.assert(
       fc.property(
-        fc.uniqueArray(participantArb, { selector: (p) => p.clientId, minLength: 1, maxLength: 35 }),
+        fc.uniqueArray(participantArb, { selector: (p) => p.publicId, minLength: 1, maxLength: 35 }),
         fc.array(
           fc.record({
             id: fc.integer({ min: 1, max: 10000 }),
@@ -77,11 +79,12 @@ describe('Capa 3 — Fuzzing de lógica financiera (money.ts)', () => {
             const p = participants[e.paidByIdx % participants.length];
             return {
               id: e.id,
-              paidByClientId: p.clientId,
+              paidByPublicId: p.publicId,
               paidByName: p.name,
               description: e.description,
               amount: e.amount,
-              createdAt: '2026-11-25T00:00:00Z'
+              createdAt: '2026-11-25T00:00:00Z',
+              isMine: false
             };
           });
 

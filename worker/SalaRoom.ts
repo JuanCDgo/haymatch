@@ -8,7 +8,6 @@ export interface Env {
 interface WsAttachment {
   clientId: string;
   name: string;
-  isOrganizer?: boolean;
 }
 
 interface CreateRoomPayload {
@@ -88,8 +87,8 @@ async function hashPin(pin: string, saltHex: string): Promise<string> {
     .join('');
 }
 
-function randomSalt(): string {
-  const bytes = new Uint8Array(16);
+function randomHex(bytesLen: number): string {
+  const bytes = new Uint8Array(bytesLen);
   crypto.getRandomValues(bytes);
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
@@ -124,11 +123,13 @@ export class SalaRoom extends DurableObject<Env> {
           total_amount INTEGER NOT NULL DEFAULT 30000,
           deadline_text TEXT NOT NULL DEFAULT '30/11',
           alias_mp TEXT NOT NULL DEFAULT '',
+          qr_image_data TEXT NOT NULL DEFAULT '',
           tiebreak_json TEXT DEFAULT NULL
         );
 
         CREATE TABLE IF NOT EXISTS participants (
           client_id TEXT PRIMARY KEY,
+          public_id TEXT NOT NULL UNIQUE,
           name TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'pendiente',
           paid_amount INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +154,7 @@ export class SalaRoom extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS expenses (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           paid_by_client_id TEXT NOT NULL,
+          paid_by_public_id TEXT NOT NULL DEFAULT '',
           paid_by_name TEXT NOT NULL,
           description TEXT NOT NULL,
           amount INTEGER NOT NULL,
@@ -164,17 +166,49 @@ export class SalaRoom extends DurableObject<Env> {
           fails INTEGER NOT NULL DEFAULT 0,
           locked_until INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS organizer_sessions (
+          client_id TEXT PRIMARY KEY,
+          granted_at TEXT NOT NULL
+        );
       `);
 
-      // Migraciones suaves para salas creadas en sprints anteriores
-      const cols = this.ctx.storage.sql
+      // Migraciones suaves para salas creadas antes de /boost
+      const metaCols = this.ctx.storage.sql
         .exec<{ name: string }>('PRAGMA table_info(room_meta)')
         .toArray();
-      if (!cols.some((c) => c.name === 'tiebreak_json')) {
+      if (!metaCols.some((c) => c.name === 'tiebreak_json')) {
         this.ctx.storage.sql.exec('ALTER TABLE room_meta ADD COLUMN tiebreak_json TEXT DEFAULT NULL');
       }
-      if (!cols.some((c) => c.name === 'vaquita_mode')) {
+      if (!metaCols.some((c) => c.name === 'vaquita_mode')) {
         this.ctx.storage.sql.exec("ALTER TABLE room_meta ADD COLUMN vaquita_mode TEXT NOT NULL DEFAULT 'cuotas'");
+      }
+      if (!metaCols.some((c) => c.name === 'qr_image_data')) {
+        this.ctx.storage.sql.exec("ALTER TABLE room_meta ADD COLUMN qr_image_data TEXT NOT NULL DEFAULT ''");
+      }
+
+      const partCols = this.ctx.storage.sql
+        .exec<{ name: string }>('PRAGMA table_info(participants)')
+        .toArray();
+      if (!partCols.some((c) => c.name === 'public_id')) {
+        this.ctx.storage.sql.exec("ALTER TABLE participants ADD COLUMN public_id TEXT NOT NULL DEFAULT ''");
+        const existing = this.ctx.storage.sql
+          .exec<{ client_id: string }>('SELECT client_id FROM participants')
+          .toArray();
+        for (const row of existing) {
+          this.ctx.storage.sql.exec(
+            'UPDATE participants SET public_id = ? WHERE client_id = ?',
+            `p_${randomHex(6)}`,
+            row.client_id
+          );
+        }
+      }
+
+      const expCols = this.ctx.storage.sql
+        .exec<{ name: string }>('PRAGMA table_info(expenses)')
+        .toArray();
+      if (!expCols.some((c) => c.name === 'paid_by_public_id')) {
+        this.ctx.storage.sql.exec("ALTER TABLE expenses ADD COLUMN paid_by_public_id TEXT NOT NULL DEFAULT ''");
       }
     });
   }
@@ -182,6 +216,14 @@ export class SalaRoom extends DurableObject<Env> {
   private roomExists(): boolean {
     const row = this.ctx.storage.sql
       .exec<{ cnt: number }>('SELECT COUNT(*) as cnt FROM room_meta WHERE id = 1')
+      .one();
+    return row.cnt > 0;
+  }
+
+  private isOrganizerClient(clientId?: string): boolean {
+    if (!clientId) return false;
+    const row = this.ctx.storage.sql
+      .exec<{ cnt: number }>('SELECT COUNT(*) as cnt FROM organizer_sessions WHERE client_id = ?', clientId)
       .one();
     return row.cnt > 0;
   }
@@ -212,7 +254,7 @@ export class SalaRoom extends DurableObject<Env> {
     return map;
   }
 
-  private buildBaseSnapshot() {
+  private buildSnapshotFor(viewerClientId?: string) {
     const meta = this.ctx.storage.sql
       .exec<{
         code: string;
@@ -225,9 +267,10 @@ export class SalaRoom extends DurableObject<Env> {
         total_amount: number;
         deadline_text: string;
         alias_mp: string;
+        qr_image_data: string;
         tiebreak_json: string | null;
       }>(
-        'SELECT code, title, created_at, vaquita_enabled, vaquita_mode, goal_people, deposit_amount, total_amount, deadline_text, alias_mp, tiebreak_json FROM room_meta WHERE id = 1'
+        'SELECT code, title, created_at, vaquita_enabled, vaquita_mode, goal_people, deposit_amount, total_amount, deadline_text, alias_mp, qr_image_data, tiebreak_json FROM room_meta WHERE id = 1'
       )
       .one();
 
@@ -236,12 +279,18 @@ export class SalaRoom extends DurableObject<Env> {
     const participantRows = this.ctx.storage.sql
       .exec<{
         client_id: string;
+        public_id: string;
         name: string;
         status: string;
         paid_amount: number;
         joined_at: string;
-      }>('SELECT client_id, name, status, paid_amount, joined_at FROM participants ORDER BY joined_at ASC')
+      }>('SELECT client_id, public_id, name, status, paid_amount, joined_at FROM participants ORDER BY joined_at ASC')
       .toArray();
+
+    const clientToPublic = new Map<string, string>();
+    for (const p of participantRows) {
+      clientToPublic.set(p.client_id, p.public_id);
+    }
 
     const optionRows = this.ctx.storage.sql
       .exec<{
@@ -270,11 +319,12 @@ export class SalaRoom extends DurableObject<Env> {
       .exec<{
         id: number;
         paid_by_client_id: string;
+        paid_by_public_id: string;
         paid_by_name: string;
         description: string;
         amount: number;
         created_at: string;
-      }>('SELECT id, paid_by_client_id, paid_by_name, description, amount, created_at FROM expenses ORDER BY id DESC')
+      }>('SELECT id, paid_by_client_id, paid_by_public_id, paid_by_name, description, amount, created_at FROM expenses ORDER BY id DESC')
       .toArray();
 
     let tiebreak: TiebreakResult | null = null;
@@ -297,15 +347,19 @@ export class SalaRoom extends DurableObject<Env> {
         depositAmount: meta.deposit_amount,
         totalAmount: meta.total_amount,
         deadlineText: meta.deadline_text,
-        aliasMp: meta.alias_mp
+        aliasMp: meta.alias_mp,
+        qrImageData: meta.qr_image_data
       },
+      // NUNCA enviamos client_id privado al navegador (prevención IDOR)
       participants: participantRows.map((p) => ({
-        clientId: p.client_id,
+        publicId: p.public_id,
         name: p.name,
         status: p.status as 'pendiente' | 'seno' | 'completo',
         paidAmount: p.paid_amount,
         joinedAt: p.joined_at,
-        isOnline: onlineIds.has(p.client_id)
+        isOnline: onlineIds.has(p.client_id),
+        isMe: Boolean(viewerClientId && p.client_id === viewerClientId),
+        isManual: p.client_id.startsWith('manual-')
       })),
       onlineCount: onlineIds.size,
       options: optionRows.map((o) => ({
@@ -319,27 +373,25 @@ export class SalaRoom extends DurableObject<Env> {
       })),
       expenses: expenseRows.map((e) => ({
         id: e.id,
-        paidByClientId: e.paid_by_client_id,
+        paidByPublicId: e.paid_by_public_id || clientToPublic.get(e.paid_by_client_id) || '',
         paidByName: e.paid_by_name,
         description: e.description,
         amount: e.amount,
-        createdAt: e.created_at
+        createdAt: e.created_at,
+        isMine: Boolean(viewerClientId && e.paid_by_client_id === viewerClientId)
       })),
+      myVotes: this.getMyVotes(viewerClientId),
+      isOrganizer: this.isOrganizerClient(viewerClientId),
       tiebreak
     };
   }
 
   private broadcastSnapshot() {
     if (!this.roomExists()) return;
-    const base = this.buildBaseSnapshot();
     for (const ws of this.ctx.getWebSockets()) {
       try {
         const att = ws.deserializeAttachment() as WsAttachment | null;
-        const payload = {
-          ...base,
-          myVotes: this.getMyVotes(att?.clientId),
-          isOrganizer: Boolean(att?.isOrganizer)
-        };
+        const payload = this.buildSnapshotFor(att?.clientId);
         ws.send(JSON.stringify({ type: 'snapshot', payload }));
       } catch {
         // Ignore stale sockets
@@ -357,15 +409,15 @@ export class SalaRoom extends DurableObject<Env> {
       }
       const body = (await request.json()) as CreateRoomPayload;
       const now = new Date().toISOString();
-      const salt = randomSalt();
-      const pinHash = await hashPin(body.pin.trim() || '1234', salt);
+      const salt = randomHex(16);
+      const pinHash = await hashPin((body.pin || '1234').trim(), salt);
       const vaquitaMode = body.vaquitaMode === 'gastos' ? 'gastos' : 'cuotas';
 
       this.ctx.storage.sql.exec(
         `INSERT INTO room_meta (
           id, code, title, created_at, organizer_pin_hash, organizer_salt,
-          vaquita_enabled, vaquita_mode, goal_people, deposit_amount, total_amount, deadline_text, alias_mp, tiebreak_json
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          vaquita_enabled, vaquita_mode, goal_people, deposit_amount, total_amount, deadline_text, alias_mp, qr_image_data, tiebreak_json
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL)`,
         body.code,
         body.title.trim().slice(0, 60),
         now,
@@ -381,11 +433,19 @@ export class SalaRoom extends DurableObject<Env> {
       );
 
       if (body.organizerClientId && body.organizerName.trim()) {
+        const cleanOrgId = body.organizerClientId.trim().slice(0, 64);
         this.ctx.storage.sql.exec(
-          `INSERT OR IGNORE INTO participants (client_id, name, status, paid_amount, joined_at)
-           VALUES (?, ?, 'pendiente', 0, ?)`,
-          body.organizerClientId,
+          `INSERT OR IGNORE INTO participants (client_id, public_id, name, status, paid_amount, joined_at)
+           VALUES (?, ?, ?, 'pendiente', 0, ?)`,
+          cleanOrgId,
+          `p_${randomHex(6)}`,
           body.organizerName.trim().slice(0, 40),
+          now
+        );
+        // Auto-autenticar al creador como organizador en su dispositivo
+        this.ctx.storage.sql.exec(
+          `INSERT OR REPLACE INTO organizer_sessions (client_id, granted_at) VALUES (?, ?)`,
+          cleanOrgId,
           now
         );
       }
@@ -401,18 +461,15 @@ export class SalaRoom extends DurableObject<Env> {
         );
       }
 
-      return Response.json(
-        { ...this.buildBaseSnapshot(), myVotes: {}, isOrganizer: false },
-        { status: 201 }
-      );
+      return Response.json(this.buildSnapshotFor(body.organizerClientId), { status: 201 });
     }
 
-    // 2. Estado inicial por HTTP
+    // 2. Estado inicial por HTTP (sin exponer client_id)
     if (request.method === 'GET' && url.pathname === '/state') {
       if (!this.roomExists()) {
         return Response.json({ error: 'No encontramos esa sala. Revisá el código.' }, { status: 404 });
       }
-      return Response.json({ ...this.buildBaseSnapshot(), myVotes: {}, isOrganizer: false });
+      return Response.json(this.buildSnapshotFor(undefined));
     }
 
     // 3. Conexión WebSocket en vivo
@@ -446,9 +503,10 @@ export class SalaRoom extends DurableObject<Env> {
       category?: string;
       title?: string;
       pin?: string;
-      targetClientId?: string;
+      targetPublicId?: string;
       status?: string;
       aliasMp?: string;
+      qrImageData?: string;
       description?: string;
       amount?: number;
       expenseId?: number;
@@ -460,28 +518,52 @@ export class SalaRoom extends DurableObject<Env> {
       return;
     }
 
-    // 1. Unirse a la sala
+    // 1. Unirse a la sala (con fusión automática si ya fue cargado manualmente por el organizador)
     if (data.type === 'join' && data.clientId && data.name) {
       const cleanId = data.clientId.trim().slice(0, 64);
       const cleanName = data.name.trim().slice(0, 40);
       if (!cleanId || !cleanName) return;
 
-      const now = new Date().toISOString();
-      this.ctx.storage.sql.exec(
-        `INSERT INTO participants (client_id, name, status, paid_amount, joined_at)
-         VALUES (?, ?, 'pendiente', 0, ?)
-         ON CONFLICT(client_id) DO UPDATE SET name = excluded.name`,
-        cleanId,
-        cleanName,
-        now
-      );
+      const existing = this.ctx.storage.sql
+        .exec<{ client_id: string }>('SELECT client_id FROM participants WHERE client_id = ?', cleanId)
+        .toArray();
 
-      const prev = ws.deserializeAttachment() as WsAttachment | null;
-      const attachment: WsAttachment = {
-        clientId: cleanId,
-        name: cleanName,
-        isOrganizer: Boolean(prev?.isOrganizer)
-      };
+      if (existing.length > 0) {
+        this.ctx.storage.sql.exec(
+          'UPDATE participants SET name = ? WHERE client_id = ?',
+          cleanName,
+          cleanId
+        );
+      } else {
+        // Buscar si existe un invitado manual con el mismo nombre exacto (sin distinguir mayúsculas)
+        const manualMatch = this.ctx.storage.sql
+          .exec<{ client_id: string }>(
+            "SELECT client_id FROM participants WHERE client_id LIKE 'manual-%' AND LOWER(TRIM(name)) = LOWER(?) LIMIT 1",
+            cleanName
+          )
+          .toArray();
+
+        if (manualMatch.length > 0) {
+          // Vinculamos el registro manual al celular real conservando su estado de seña/pago
+          this.ctx.storage.sql.exec(
+            'UPDATE participants SET client_id = ?, name = ? WHERE client_id = ?',
+            cleanId,
+            cleanName,
+            manualMatch[0].client_id
+          );
+        } else {
+          this.ctx.storage.sql.exec(
+            `INSERT INTO participants (client_id, public_id, name, status, paid_amount, joined_at)
+             VALUES (?, ?, ?, 'pendiente', 0, ?)`,
+            cleanId,
+            `p_${randomHex(6)}`,
+            cleanName,
+            new Date().toISOString()
+          );
+        }
+      }
+
+      const attachment: WsAttachment = { clientId: cleanId, name: cleanName };
       ws.serializeAttachment(attachment);
       this.broadcastSnapshot();
       return;
@@ -492,6 +574,8 @@ export class SalaRoom extends DurableObject<Env> {
       ws.send(JSON.stringify({ type: 'error', message: 'Primero ingresá a la sala con tu apodo.' }));
       return;
     }
+
+    const isOrg = this.isOrganizerClient(att.clientId);
 
     // 2. Votar tarjeta
     if (data.type === 'vote' && typeof data.optionId === 'number' && (data.vote === 0 || data.vote === 1)) {
@@ -543,7 +627,7 @@ export class SalaRoom extends DurableObject<Env> {
 
     // 4. Desempate en servidor
     if (data.type === 'tiebreak') {
-      const base = this.buildBaseSnapshot();
+      const base = this.buildSnapshotFor(att.clientId);
       const maxYes = Math.max(0, ...base.options.map((o) => o.yesCount));
       if (maxYes === 0) {
         ws.send(JSON.stringify({ type: 'error', message: 'Todavía no hay votos positivos para desempatar.' }));
@@ -575,7 +659,7 @@ export class SalaRoom extends DurableObject<Env> {
       return;
     }
 
-    // 5. Autenticación de Organizador con bloqueo anti-fuerza bruta (5 fallos -> 120s)
+    // 5. Autenticación de Organizador persistente + bloqueo anti-fuerza bruta (5 fallos -> 120s)
     if (data.type === 'auth_organizer' && typeof data.pin === 'string') {
       const nowMs = Date.now();
       const attemptRows = this.ctx.storage.sql
@@ -607,7 +691,11 @@ export class SalaRoom extends DurableObject<Env> {
       const candidateHash = await hashPin(data.pin.trim(), secret.organizer_salt);
       if (timingSafeEqual(candidateHash, secret.organizer_pin_hash)) {
         this.ctx.storage.sql.exec('DELETE FROM auth_attempts WHERE client_id = ?', att.clientId);
-        ws.serializeAttachment({ ...att, isOrganizer: true });
+        this.ctx.storage.sql.exec(
+          'INSERT OR REPLACE INTO organizer_sessions (client_id, granted_at) VALUES (?, ?)',
+          att.clientId,
+          new Date().toISOString()
+        );
         ws.send(JSON.stringify({ type: 'auth_result', ok: true }));
         this.broadcastSnapshot();
       } else {
@@ -637,14 +725,14 @@ export class SalaRoom extends DurableObject<Env> {
     }
 
     if (data.type === 'logout_organizer') {
-      ws.serializeAttachment({ ...att, isOrganizer: false });
+      this.ctx.storage.sql.exec('DELETE FROM organizer_sessions WHERE client_id = ?', att.clientId);
       this.broadcastSnapshot();
       return;
     }
 
-    // 6. Acciones exclusivas de Organizador (cerrojo en servidor)
-    if (data.type === 'set_payment' && data.targetClientId && data.status) {
-      if (!att.isOrganizer) {
+    // 6. Acciones exclusivas de Organizador (cerrojo en servidor usando publicId)
+    if (data.type === 'set_payment' && data.targetPublicId && data.status) {
+      if (!isOrg) {
         ws.send(JSON.stringify({ type: 'error', message: 'Solo el organizador puede modificar pagos.' }));
         return;
       }
@@ -664,17 +752,17 @@ export class SalaRoom extends DurableObject<Env> {
             : 0;
 
       this.ctx.storage.sql.exec(
-        'UPDATE participants SET status = ?, paid_amount = ? WHERE client_id = ?',
+        'UPDATE participants SET status = ?, paid_amount = ? WHERE public_id = ?',
         data.status,
         paidAmount,
-        data.targetClientId
+        data.targetPublicId
       );
       this.broadcastSnapshot();
       return;
     }
 
     if (data.type === 'add_guest' && typeof data.name === 'string') {
-      if (!att.isOrganizer) {
+      if (!isOrg) {
         ws.send(JSON.stringify({ type: 'error', message: 'Solo el organizador puede cargar invitados.' }));
         return;
       }
@@ -689,11 +777,12 @@ export class SalaRoom extends DurableObject<Env> {
       const paidAmount =
         status === 'completo' ? meta.total_amount : status === 'seno' ? meta.deposit_amount : 0;
 
-      const guestId = `manual-${crypto.randomUUID().slice(0, 8)}`;
+      const guestId = `manual-${randomHex(6)}`;
       this.ctx.storage.sql.exec(
-        `INSERT INTO participants (client_id, name, status, paid_amount, joined_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO participants (client_id, public_id, name, status, paid_amount, joined_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
         guestId,
+        `p_${randomHex(6)}`,
         cleanName,
         status,
         paidAmount,
@@ -703,8 +792,22 @@ export class SalaRoom extends DurableObject<Env> {
       return;
     }
 
+    if (data.type === 'remove_guest' && typeof data.targetPublicId === 'string') {
+      if (!isOrg) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Solo el organizador puede quitar invitados.' }));
+        return;
+      }
+      const target = this.ctx.storage.sql
+        .exec<{ client_id: string }>('SELECT client_id FROM participants WHERE public_id = ?', data.targetPublicId)
+        .toArray();
+      if (target.length === 0 || target[0].client_id === att.clientId) return;
+      this.ctx.storage.sql.exec('DELETE FROM participants WHERE public_id = ?', data.targetPublicId);
+      this.broadcastSnapshot();
+      return;
+    }
+
     if (data.type === 'update_alias' && typeof data.aliasMp === 'string') {
-      if (!att.isOrganizer) {
+      if (!isOrg) {
         ws.send(JSON.stringify({ type: 'error', message: 'Solo el organizador puede editar el Alias.' }));
         return;
       }
@@ -712,6 +815,21 @@ export class SalaRoom extends DurableObject<Env> {
         'UPDATE room_meta SET alias_mp = ? WHERE id = 1',
         data.aliasMp.trim().slice(0, 60)
       );
+      this.broadcastSnapshot();
+      return;
+    }
+
+    if (data.type === 'update_qr_image' && typeof data.qrImageData === 'string') {
+      if (!isOrg) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Solo el organizador puede subir el QR.' }));
+        return;
+      }
+      const img = data.qrImageData.trim();
+      if (img && (!img.startsWith('data:image/') || img.length > 220_000)) {
+        ws.send(JSON.stringify({ type: 'error', message: 'La imagen QR es inválida o demasiado pesada.' }));
+        return;
+      }
+      this.ctx.storage.sql.exec('UPDATE room_meta SET qr_image_data = ? WHERE id = 1', img);
       this.broadcastSnapshot();
       return;
     }
@@ -724,10 +842,15 @@ export class SalaRoom extends DurableObject<Env> {
         ws.send(JSON.stringify({ type: 'error', message: 'Ingresá una descripción y un monto válido.' }));
         return;
       }
+      const me = this.ctx.storage.sql
+        .exec<{ public_id: string }>('SELECT public_id FROM participants WHERE client_id = ?', att.clientId)
+        .toArray();
+      const myPubId = me[0]?.public_id || '';
       this.ctx.storage.sql.exec(
-        `INSERT INTO expenses (paid_by_client_id, paid_by_name, description, amount, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO expenses (paid_by_client_id, paid_by_public_id, paid_by_name, description, amount, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
         att.clientId,
+        myPubId,
         att.name,
         desc,
         amount,
@@ -742,7 +865,7 @@ export class SalaRoom extends DurableObject<Env> {
         .exec<{ paid_by_client_id: string }>('SELECT paid_by_client_id FROM expenses WHERE id = ?', data.expenseId)
         .toArray();
       if (rows.length === 0) return;
-      if (!att.isOrganizer && rows[0].paid_by_client_id !== att.clientId) {
+      if (!isOrg && rows[0].paid_by_client_id !== att.clientId) {
         ws.send(JSON.stringify({ type: 'error', message: 'Solo el autor o el organizador puede borrar este gasto.' }));
         return;
       }

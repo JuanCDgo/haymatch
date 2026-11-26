@@ -35,7 +35,7 @@ export interface SettlementTransfer {
 export interface ExpenseSplitSummary {
   totalSpent: number;
   perPerson: number;
-  balances: Array<{ clientId: string; name: string; paid: number; net: number }>;
+  balances: Array<{ publicId: string; name: string; paid: number; net: number }>;
   transfers: SettlementTransfer[];
 }
 
@@ -53,16 +53,16 @@ export function calculateExpenseSplit(
 
   const paidMap = new Map<string, number>();
   for (const p of participants) {
-    paidMap.set(p.clientId, 0);
+    paidMap.set(p.publicId, 0);
   }
   for (const e of expenses) {
-    paidMap.set(e.paidByClientId, (paidMap.get(e.paidByClientId) ?? 0) + Math.max(0, Math.round(e.amount)));
+    paidMap.set(e.paidByPublicId, (paidMap.get(e.paidByPublicId) ?? 0) + Math.max(0, Math.round(e.amount)));
   }
 
   const balances = participants.map((p) => {
-    const paid = paidMap.get(p.clientId) ?? 0;
+    const paid = paidMap.get(p.publicId) ?? 0;
     return {
-      clientId: p.clientId,
+      publicId: p.publicId,
       name: p.name,
       paid,
       net: paid - perPerson

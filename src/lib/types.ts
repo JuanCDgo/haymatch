@@ -11,17 +11,20 @@ export interface RoomMeta {
   totalAmount: number;
   deadlineText: string;
   aliasMp: string;
+  qrImageData: string;
 }
 
 export type PaymentStatus = 'pendiente' | 'seno' | 'completo';
 
 export interface Participant {
-  clientId: string;
+  publicId: string;
   name: string;
   status: PaymentStatus;
   paidAmount: number;
   joinedAt: string;
   isOnline: boolean;
+  isMe: boolean;
+  isManual: boolean;
 }
 
 export interface RoomOption {
@@ -36,11 +39,12 @@ export interface RoomOption {
 
 export interface Expense {
   id: number;
-  paidByClientId: string;
+  paidByPublicId: string;
   paidByName: string;
   description: string;
   amount: number;
   createdAt: string;
+  isMine: boolean;
 }
 
 export interface TiebreakResult {
@@ -74,8 +78,10 @@ export type WsOutgoing =
   | { type: 'tiebreak' }
   | { type: 'auth_organizer'; pin: string }
   | { type: 'logout_organizer' }
-  | { type: 'set_payment'; targetClientId: string; status: PaymentStatus }
+  | { type: 'set_payment'; targetPublicId: string; status: PaymentStatus }
   | { type: 'add_guest'; name: string; status: PaymentStatus }
+  | { type: 'remove_guest'; targetPublicId: string }
   | { type: 'update_alias'; aliasMp: string }
+  | { type: 'update_qr_image'; qrImageData: string }
   | { type: 'add_expense'; description: string; amount: number }
   | { type: 'delete_expense'; expenseId: number };

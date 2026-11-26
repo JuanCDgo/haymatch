@@ -13,6 +13,7 @@
     Trash2,
     ArrowRight,
     Share2,
+    Upload,
     X
   } from 'lucide-svelte';
   import type { PaymentStatus, RoomSnapshot } from '../types';
@@ -20,28 +21,30 @@
 
   interface Props {
     snapshot: RoomSnapshot;
-    clientId: string;
     authMessage: string;
     authLockedUntil: number;
     onAuthOrganizer: (pin: string) => void;
     onLogoutOrganizer: () => void;
-    onSetPayment: (targetClientId: string, status: PaymentStatus) => void;
+    onSetPayment: (targetPublicId: string, status: PaymentStatus) => void;
     onAddGuest: (name: string, status: PaymentStatus) => void;
+    onRemoveGuest: (targetPublicId: string) => void;
     onUpdateAlias: (aliasMp: string) => void;
+    onUpdateQrImage: (qrImageData: string) => void;
     onAddExpense: (description: string, amount: number) => void;
     onDeleteExpense: (expenseId: number) => void;
   }
 
   let {
     snapshot,
-    clientId,
     authMessage,
     authLockedUntil,
     onAuthOrganizer,
     onLogoutOrganizer,
     onSetPayment,
     onAddGuest,
+    onRemoveGuest,
     onUpdateAlias,
+    onUpdateQrImage,
     onAddExpense,
     onDeleteExpense
   }: Props = $props();
@@ -49,8 +52,9 @@
   // Estado UI Modo Cuotas
   let filter = $state<'todos' | 'completo' | 'seno' | 'pendiente'>('todos');
   let showQrModal = $state(false);
-  let qrDataUrl = $state('');
+  let qrFallbackUrl = $state('');
   let copiedAlias = $state(false);
+  let qrUploadError = $state('');
 
   // Estado UI Modo Organizador
   let showPinModal = $state(false);
@@ -74,7 +78,6 @@
     authLockedUntil > nowTick ? Math.ceil((authLockedUntil - nowTick) / 1000) : 0
   );
 
-  // Si se autentica con éxito, cerramos el modal del PIN automáticamente
   $effect(() => {
     if (snapshot.isOrganizer && showPinModal) {
       showPinModal = false;
@@ -108,18 +111,52 @@
 
   async function openQrModal() {
     showQrModal = true;
-    const payload = snapshot.room.aliasMp
-      ? `ALIAS:${snapshot.room.aliasMp} | ${snapshot.room.title} | Sena ${formatARS(snapshot.room.depositAmount)}`
-      : `${snapshot.room.title} | Sala ${snapshot.room.code}`;
-    try {
-      qrDataUrl = await QRCode.toDataURL(payload, {
-        width: 220,
-        margin: 2,
-        color: { dark: '#121417', light: '#ffffff' }
-      });
-    } catch {
-      qrDataUrl = '';
+    qrUploadError = '';
+    if (!snapshot.room.qrImageData) {
+      const payload = snapshot.room.aliasMp
+        ? `ALIAS:${snapshot.room.aliasMp} | ${snapshot.room.title} | Sena ${formatARS(snapshot.room.depositAmount)}`
+        : `${snapshot.room.title} | Sala ${snapshot.room.code}`;
+      try {
+        qrFallbackUrl = await QRCode.toDataURL(payload, {
+          width: 220,
+          margin: 2,
+          color: { dark: '#121417', light: '#ffffff' }
+        });
+      } catch {
+        qrFallbackUrl = '';
+      }
     }
+  }
+
+  function handleQrFileUpload(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    qrUploadError = '';
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 360;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const compressed = canvas.toDataURL('image/webp', 0.8);
+        if (compressed.length > 200_000) {
+          qrUploadError = 'La imagen es demasiado grande. Probá con una captura más recortada.';
+          return;
+        }
+        onUpdateQrImage(compressed);
+      };
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+    input.value = '';
   }
 
   async function copyAlias() {
@@ -213,7 +250,7 @@
   </div>
 
   {#if snapshot.room.vaquitaMode === 'cuotas'}
-    <!-- MODO 1: CUOTA Y SEÑAS (Estilo Boceto Stitch Modo Día) -->
+    <!-- MODO 1: CUOTA Y SEÑAS -->
     <section class="card stack">
       <div class="section-head">
         <h2>Estado de la Vaquita</h2>
@@ -304,6 +341,9 @@
             <h3>Cargar compañero manualmente</h3>
           </div>
         </div>
+        <p class="muted small">
+          Si luego entra por el link con el mismo nombre, se vincula solo sin duplicarse.
+        </p>
         <div class="guest-form-row">
           <input
             type="text"
@@ -322,7 +362,7 @@
       </form>
     {/if}
 
-    <!-- Lista de Participantes y Pagos (UI Limpia sin badges redundantes de "Al día") -->
+    <!-- Lista de Participantes y Pagos -->
     <section class="stack">
       <div class="section-head">
         <h3>Participantes y Pagos</h3>
@@ -345,7 +385,7 @@
       </div>
 
       <ul class="people-list">
-        {#each filteredParticipants as person (person.clientId)}
+        {#each filteredParticipants as person (person.publicId)}
           {@const remaining = Math.max(0, snapshot.room.totalAmount - person.paidAmount)}
           <li class="card person-card">
             <div class="person-main">
@@ -375,28 +415,40 @@
             </div>
 
             {#if snapshot.isOrganizer}
-              <div class="org-controls">
-                <button
-                  class="state-btn"
-                  class:selected={person.status === 'pendiente'}
-                  onclick={() => onSetPayment(person.clientId, 'pendiente')}
-                >
-                  Pendiente
-                </button>
-                <button
-                  class="state-btn"
-                  class:selected={person.status === 'seno'}
-                  onclick={() => onSetPayment(person.clientId, 'seno')}
-                >
-                  Señó ({formatARS(snapshot.room.depositAmount)})
-                </button>
-                <button
-                  class="state-btn"
-                  class:selected={person.status === 'completo'}
-                  onclick={() => onSetPayment(person.clientId, 'completo')}
-                >
-                  Completo
-                </button>
+              <div class="org-controls-row">
+                <div class="org-controls">
+                  <button
+                    class="state-btn"
+                    class:selected={person.status === 'pendiente'}
+                    onclick={() => onSetPayment(person.publicId, 'pendiente')}
+                  >
+                    Pendiente
+                  </button>
+                  <button
+                    class="state-btn"
+                    class:selected={person.status === 'seno'}
+                    onclick={() => onSetPayment(person.publicId, 'seno')}
+                  >
+                    Señó
+                  </button>
+                  <button
+                    class="state-btn"
+                    class:selected={person.status === 'completo'}
+                    onclick={() => onSetPayment(person.publicId, 'completo')}
+                  >
+                    Completo
+                  </button>
+                </div>
+                {#if !person.isMe}
+                  <button
+                    class="del-btn"
+                    onclick={() => onRemoveGuest(person.publicId)}
+                    aria-label="Quitar de la lista"
+                    title="Quitar de la lista"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                {/if}
               </div>
             {/if}
           </li>
@@ -449,7 +501,6 @@
       </form>
     </section>
 
-    <!-- Quién le transfiere a quién -->
     <section class="card stack">
       <div class="section-head">
         <h3>Quién le transfiere a quién</h3>
@@ -476,7 +527,6 @@
       {/if}
     </section>
 
-    <!-- Historial de gastos -->
     <section class="card stack">
       <div class="section-head">
         <h3>Gastos cargados ({snapshot.expenses.length})</h3>
@@ -493,7 +543,7 @@
               </div>
               <div class="expense-right">
                 <strong>{formatARS(exp.amount)}</strong>
-                {#if snapshot.isOrganizer || exp.paidByClientId === clientId}
+                {#if snapshot.isOrganizer || exp.isMine}
                   <button
                     class="del-btn"
                     onclick={() => onDeleteExpense(exp.id)}
@@ -524,8 +574,10 @@
       </div>
 
       <div class="qr-box">
-        {#if qrDataUrl}
-          <img src={qrDataUrl} alt="Código QR de pago" width="210" height="210" />
+        {#if snapshot.room.qrImageData}
+          <img src={snapshot.room.qrImageData} alt="Código QR oficial de pago" class="qr-img" />
+        {:else if qrFallbackUrl}
+          <img src={qrFallbackUrl} alt="Código QR de pago" width="210" height="210" />
         {:else}
           <p class="muted">Generando QR...</p>
         {/if}
@@ -537,6 +589,11 @@
         <span class="muted small">
           Seña: {formatARS(snapshot.room.depositAmount)} · Total: {formatARS(snapshot.room.totalAmount)}
         </span>
+        {#if !snapshot.room.qrImageData}
+          <span class="muted small">
+            Tocá <strong>Copiar Alias</strong> y pegalo en tu billetera (Mercado Pago / Banco).
+          </span>
+        {/if}
       </div>
 
       {#if snapshot.room.aliasMp}
@@ -549,6 +606,22 @@
             <span>Copiar Alias</span>
           {/if}
         </button>
+      {/if}
+
+      {#if snapshot.isOrganizer}
+        <div class="qr-upload-row">
+          <label class="btn-secondary upload-label">
+            <Upload size={15} />
+            <span>{snapshot.room.qrImageData ? 'Cambiar imagen QR de MP' : 'Subir QR oficial de Mercado Pago'}</span>
+            <input type="file" accept="image/*" onchange={handleQrFileUpload} hidden />
+          </label>
+          {#if snapshot.room.qrImageData}
+            <button class="mini-btn" onclick={() => onUpdateQrImage('')}>Quitar</button>
+          {/if}
+        </div>
+        {#if qrUploadError}
+          <p class="error-banner">{qrUploadError}</p>
+        {/if}
       {/if}
     </div>
   </div>
@@ -916,12 +989,19 @@
     white-space: nowrap;
   }
 
+  .org-controls-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
   .org-controls {
+    flex: 1;
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 6px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border-subtle);
   }
 
   .state-btn {
@@ -1029,12 +1109,32 @@
     border-radius: 14px;
   }
 
+  .qr-img {
+    max-width: 220px;
+    max-height: 220px;
+    object-fit: contain;
+    border-radius: 8px;
+  }
+
   .qr-details {
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
-    gap: 3px;
+    gap: 4px;
+  }
+
+  .qr-upload-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .upload-label {
+    flex: 1;
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 9px 10px;
   }
 
   .muted {
